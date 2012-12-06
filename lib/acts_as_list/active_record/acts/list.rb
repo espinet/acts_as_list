@@ -226,126 +226,124 @@ module ActiveRecord
           end
         end
 
-        private
+        # Overwrite this method to define the scope of the list changes
+        def scope_condition() "1" end
 
-          # Overwrite this method to define the scope of the list changes
-          def scope_condition() "1" end
+        # Returns the bottom position number in the list.
+        #   bottom_position_in_list    # => 2
+        def bottom_position_in_list(except = nil)
+          item = bottom_item(except)
+          item ? item.send(position_column) : acts_as_list_top - 1
+        end
 
-          # Returns the bottom position number in the list.
-          #   bottom_position_in_list    # => 2
-          def bottom_position_in_list(except = nil)
-            item = bottom_item(except)
-            item ? item.send(position_column) : acts_as_list_top - 1
-          end
+        # Returns the bottom item
+        def bottom_item(except = nil)
+          conditions = scope_condition
+          conditions = "#{conditions} AND #{self.class.primary_key} != #{except.id}" if except
+          acts_as_list_class.unscoped.find(:first, :conditions => conditions, :order => "#{acts_as_list_class.table_name}.#{position_column} DESC")
+        end
 
-          # Returns the bottom item
-          def bottom_item(except = nil)
-            conditions = scope_condition
-            conditions = "#{conditions} AND #{self.class.primary_key} != #{except.id}" if except
-            acts_as_list_class.unscoped.find(:first, :conditions => conditions, :order => "#{acts_as_list_class.table_name}.#{position_column} DESC")
-          end
+        # Forces item to assume the bottom position in the list.
+        def assume_bottom_position
+          set_list_position(bottom_position_in_list(self).to_i + 1)
+        end
 
-          # Forces item to assume the bottom position in the list.
-          def assume_bottom_position
-            set_list_position(bottom_position_in_list(self).to_i + 1)
-          end
+        # Forces item to assume the top position in the list.
+        def assume_top_position
+          set_list_position(acts_as_list_top)
+        end
 
-          # Forces item to assume the top position in the list.
-          def assume_top_position
-            set_list_position(acts_as_list_top)
-          end
+        # This has the effect of moving all the higher items up one.
+        def decrement_positions_on_higher_items(position)
+          acts_as_list_class.unscoped.update_all(
+            "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} <= #{position}"
+          )
+        end
 
-          # This has the effect of moving all the higher items up one.
-          def decrement_positions_on_higher_items(position)
+        # This has the effect of moving all the lower items up one.
+        def decrement_positions_on_lower_items(position=nil)
+          return unless in_list?
+          position ||= send(position_column).to_i
+          acts_as_list_class.unscoped.update_all(
+            "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} > #{position}"
+          )
+        end
+
+        # This has the effect of moving all the higher items down one.
+        def increment_positions_on_higher_items
+          return unless in_list?
+          acts_as_list_class.unscoped.update_all(
+            "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} < #{send(position_column).to_i}"
+          )
+        end
+
+        # This has the effect of moving all the lower items down one.
+        def increment_positions_on_lower_items(position)
+          acts_as_list_class.unscoped.update_all(
+            "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} >= #{position}"
+         )
+        end
+
+        # Increments position (<tt>position_column</tt>) of all items in the list.
+        def increment_positions_on_all_items
+          acts_as_list_class.unscoped.update_all(
+            "#{position_column} = (#{position_column} + 1)",  "#{scope_condition}"
+          )
+        end
+
+        # Reorders intermediate items to support moving an item from old_position to new_position.
+        def shuffle_positions_on_intermediate_items(old_position, new_position, avoid_id = nil)
+          return if old_position == new_position
+          avoid_id_condition = avoid_id ? " AND #{self.class.primary_key} != #{avoid_id}" : ''
+          if old_position < new_position
+            # Decrement position of intermediate items
+            #
+            # e.g., if moving an item from 2 to 5,
+            # move [3, 4, 5] to [2, 3, 4]
             acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} <= #{position}"
+              "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} > #{old_position} AND #{position_column} <= #{new_position}#{avoid_id_condition}"
+            )
+          else
+            # Increment position of intermediate items
+            #
+            # e.g., if moving an item from 5 to 2,
+            # move [2, 3, 4] to [3, 4, 5]
+            acts_as_list_class.unscoped.update_all(
+              "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} >= #{new_position} AND #{position_column} < #{old_position}#{avoid_id_condition}"
             )
           end
+        end
 
-          # This has the effect of moving all the lower items up one.
-          def decrement_positions_on_lower_items(position=nil)
-            return unless in_list?
-            position ||= send(position_column).to_i
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} > #{position}"
-            )
+        def insert_at_position(position)
+          if in_list?
+            old_position = send(position_column).to_i
+            return if position == old_position
+            shuffle_positions_on_intermediate_items(old_position, position)
+          else
+            increment_positions_on_lower_items(position)
           end
+          set_list_position(position)
+        end
 
-          # This has the effect of moving all the higher items down one.
-          def increment_positions_on_higher_items
-            return unless in_list?
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} < #{send(position_column).to_i}"
-            )
+        # used by insert_at_position instead of remove_from_list, as postgresql raises error if position_column has non-null constraint
+        def store_at_0
+          if in_list?
+            old_position = send(position_column).to_i
+            set_list_position(0)
+            decrement_positions_on_lower_items(old_position)
           end
+        end
 
-          # This has the effect of moving all the lower items down one.
-          def increment_positions_on_lower_items(position)
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} >= #{position}"
-           )
-          end
+        def update_positions
+          old_position = send("#{position_column}_was").to_i
+          new_position = send(position_column).to_i
+          return unless acts_as_list_class.unscoped.where("#{scope_condition} AND #{position_column} = #{new_position}").count > 1
+          shuffle_positions_on_intermediate_items old_position, new_position, id
+        end
 
-          # Increments position (<tt>position_column</tt>) of all items in the list.
-          def increment_positions_on_all_items
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} + 1)",  "#{scope_condition}"
-            )
-          end
-
-          # Reorders intermediate items to support moving an item from old_position to new_position.
-          def shuffle_positions_on_intermediate_items(old_position, new_position, avoid_id = nil)
-            return if old_position == new_position
-            avoid_id_condition = avoid_id ? " AND #{self.class.primary_key} != #{avoid_id}" : ''
-            if old_position < new_position
-              # Decrement position of intermediate items
-              #
-              # e.g., if moving an item from 2 to 5,
-              # move [3, 4, 5] to [2, 3, 4]
-              acts_as_list_class.unscoped.update_all(
-                "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} > #{old_position} AND #{position_column} <= #{new_position}#{avoid_id_condition}"
-              )
-            else
-              # Increment position of intermediate items
-              #
-              # e.g., if moving an item from 5 to 2,
-              # move [2, 3, 4] to [3, 4, 5]
-              acts_as_list_class.unscoped.update_all(
-                "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} >= #{new_position} AND #{position_column} < #{old_position}#{avoid_id_condition}"
-              )
-            end
-          end
-
-          def insert_at_position(position)
-            if in_list?
-              old_position = send(position_column).to_i
-              return if position == old_position
-              shuffle_positions_on_intermediate_items(old_position, position)
-            else
-              increment_positions_on_lower_items(position)
-            end
-            set_list_position(position)
-          end
-
-          # used by insert_at_position instead of remove_from_list, as postgresql raises error if position_column has non-null constraint
-          def store_at_0
-            if in_list?
-              old_position = send(position_column).to_i
-              set_list_position(0)
-              decrement_positions_on_lower_items(old_position)
-            end
-          end
-
-          def update_positions
-            old_position = send("#{position_column}_was").to_i
-            new_position = send(position_column).to_i
-            return unless acts_as_list_class.unscoped.where("#{scope_condition} AND #{position_column} = #{new_position}").count > 1
-            shuffle_positions_on_intermediate_items old_position, new_position, id
-          end
-
-          def reload_position
-            self.reload
-          end
+        def reload_position
+          self.reload
+        end
       end
     end
   end
